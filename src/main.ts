@@ -75,8 +75,8 @@ async function bootstrap() {
 
   // Health check (outside the global prefix so Docker/Cloudflare can reach it simply)
   const httpAdapter = app.getHttpAdapter();
-  httpAdapter.get('/health', (_req, res) => res.send({ status: 'ok' }));
-  httpAdapter.get(`/${apiPrefix}/health`, (_req, res) => res.send({ status: 'ok' }));
+  httpAdapter.get('/health', (_req, res: any) => res.send({ status: 'ok' }));
+  httpAdapter.get(`/${apiPrefix}/health`, (_req, res: any) => res.send({ status: 'ok' }));
 
   await app.listen(port);
   Logger.log(`🚀 VehiculeDZ API started on port ${port}`, 'Bootstrap');
