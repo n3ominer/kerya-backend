@@ -168,7 +168,7 @@ export class BookingsService {
   async findAllForCustomer(customerId: string) {
     return this.bookingRepo.find({
       where: { customerId },
-      relations: ['vehicle', 'vehicle.photos'],
+      relations: ['vehicle', 'vehicle.photos', 'lessor'],
       order: { createdAt: 'DESC' },
     });
   }
@@ -237,6 +237,10 @@ export class BookingsService {
 
     if (!allowed[booking.status]?.includes(dto.status)) {
       throw new BadRequestException(`Transition ${booking.status} → ${dto.status} invalide`);
+    }
+
+    if (dto.status === 'completed' && booking.paymentStatus !== 'paid') {
+      throw new BadRequestException('La réservation doit être payée avant de pouvoir être marquée comme terminée');
     }
 
     // If rejected or cancelled, free up availability slot

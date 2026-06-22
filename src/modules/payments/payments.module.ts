@@ -276,7 +276,6 @@ export class PaymentsService {
       paidAt: new Date(),
     });
     booking.paymentStatus = 'paid';
-    if (booking.status === 'confirmed') booking.status = 'completed';
     await this.bookingRepo.save(booking);
     return this.paymentRepo.save(payment);
   }

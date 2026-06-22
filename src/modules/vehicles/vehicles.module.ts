@@ -11,9 +11,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { diskStorage } from 'multer';
-import { extname, join } from 'path';
-import { existsSync, mkdirSync } from 'fs';
+import { memoryStorage } from 'multer';
+import { StorageService } from '../../common/storage.service';
 import {
   IsString, IsNumber, IsBoolean, IsOptional,
   IsArray,
@@ -248,14 +247,13 @@ export class VehiclesService {
     return this.vehicleRepo.save(vehicle);
   }
 
-  async addPhoto(vehicleId: string, ownerUserId: string, file: Express.Multer.File, isCover: boolean) {
+  async addPhotoWithUrl(vehicleId: string, ownerUserId: string, url: string, isCover: boolean) {
     const lessor = await this.resolveLessor(ownerUserId);
     const vehicle = await this.vehicleRepo.findOne({ where: { id: vehicleId, lessorId: lessor.id } });
     if (!vehicle) throw new NotFoundException('Véhicule introuvable');
 
     const existingCount = await this.photoRepo.count({ where: { vehicleId } });
     if (isCover) {
-      // Unset existing cover
       await this.photoRepo
         .createQueryBuilder()
         .update()
@@ -266,7 +264,7 @@ export class VehiclesService {
 
     const photo = this.photoRepo.create({
       vehicleId,
-      url: `/uploads/vehicles/${vehicleId}/${file.filename}`,
+      url,
       isCover: isCover || existingCount === 0,
       sortOrder: existingCount,
     });
@@ -316,7 +314,10 @@ export class VehiclesService {
 @ApiTags('vehicles')
 @Controller('vehicles')
 export class VehiclesController {
-  constructor(private readonly vehiclesService: VehiclesService) {}
+  constructor(
+    private readonly vehiclesService: VehiclesService,
+    private readonly storage: StorageService,
+  ) {}
 
   @Get('search')
   @ApiOperation({ summary: 'Rechercher des véhicules disponibles' })
@@ -358,27 +359,18 @@ export class VehiclesController {
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('lessor')
   @UseInterceptors(FileInterceptor('file', {
-    storage: diskStorage({
-      destination: (req, file, cb) => {
-        const dir = join(process.cwd(), 'uploads', 'vehicles', String(req.params.id));
-        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-        cb(null, dir);
-      },
-      filename: (req, file, cb) => {
-        const unique = `${Date.now()}-${Math.round(Math.random() * 1e6)}`;
-        cb(null, `${unique}${extname(file.originalname)}`);
-      },
-    }),
-    limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+    storage: memoryStorage(),
+    limits: { fileSize: 10 * 1024 * 1024 },
   }))
   @ApiOperation({ summary: 'Uploader une photo pour un véhicule' })
-  addPhoto(
+  async addPhoto(
     @Param('id') vehicleId: string,
     @Request() req: any,
     @UploadedFile() file: Express.Multer.File,
     @Query('isCover') isCover: string,
   ) {
-    return this.vehiclesService.addPhoto(vehicleId, req.user.id, file, isCover === 'true');
+    const url = await this.storage.upload(file.buffer, `vehicles/${vehicleId}`, file.originalname);
+    return this.vehiclesService.addPhotoWithUrl(vehicleId, req.user.id, url, isCover === 'true');
   }
 
   @Delete(':id/photos/:photoId')
@@ -425,7 +417,7 @@ export class VehiclesController {
     TypeOrmModule.forFeature([Vehicle, VehiclePhoto, Lessor, Availability, Review, User]),
   ],
   controllers: [VehiclesController],
-  providers: [VehiclesService],
+  providers: [VehiclesService, StorageService],
   exports: [VehiclesService],
 })
 export class VehiclesModule {}

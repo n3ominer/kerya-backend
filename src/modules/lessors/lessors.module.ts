@@ -6,9 +6,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { diskStorage } from 'multer';
-import { extname, join } from 'path';
-import { existsSync, mkdirSync } from 'fs';
+import { memoryStorage } from 'multer';
+import { StorageService } from '../../common/storage.service';
 import { IsString, IsOptional, IsEnum } from 'class-validator';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { Lessor, User } from '../../database/entities';
@@ -78,9 +77,9 @@ export class LessorsService {
     return this.lessorRepo.save(lessor);
   }
 
-  async updateLogo(ownerUserId: string, file: Express.Multer.File) {
+  async updateLogoUrl(ownerUserId: string, url: string) {
     const lessor = await this.findMyProfile(ownerUserId);
-    lessor.logoUrl = `/uploads/lessors/${ownerUserId}/${file.filename}`;
+    lessor.logoUrl = url;
     return this.lessorRepo.save(lessor);
   }
 }
@@ -90,7 +89,10 @@ export class LessorsService {
 @UseGuards(JwtAuthGuard)
 @Controller('lessors')
 export class LessorsController {
-  constructor(private readonly lessorsService: LessorsService) {}
+  constructor(
+    private readonly lessorsService: LessorsService,
+    private readonly storage: StorageService,
+  ) {}
 
   @Post('profile')
   @ApiOperation({ summary: 'Créer profil loueur' })
@@ -113,21 +115,12 @@ export class LessorsController {
   @Post('profile/me/logo')
   @ApiOperation({ summary: 'Uploader le logo du loueur' })
   @UseInterceptors(FileInterceptor('file', {
-    storage: diskStorage({
-      destination: (req, file, cb) => {
-        const dir = join(process.cwd(), 'uploads', 'lessors', String((req as any).user.id));
-        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-        cb(null, dir);
-      },
-      filename: (req, file, cb) => {
-        const unique = `${Date.now()}-${Math.round(Math.random() * 1e6)}`;
-        cb(null, `${unique}${extname(file.originalname)}`);
-      },
-    }),
-    limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
+    storage: memoryStorage(),
+    limits: { fileSize: 5 * 1024 * 1024 },
   }))
-  updateLogo(@Request() req: any, @UploadedFile() file: Express.Multer.File) {
-    return this.lessorsService.updateLogo(req.user.id, file);
+  async updateLogo(@Request() req: any, @UploadedFile() file: Express.Multer.File) {
+    const url = await this.storage.upload(file.buffer, `lessors/${req.user.id}`, file.originalname);
+    return this.lessorsService.updateLogoUrl(req.user.id, url);
   }
 
   @Get(':id')
@@ -141,7 +134,7 @@ export class LessorsController {
 @NestModule({
   imports: [TypeOrmModule.forFeature([Lessor])],
   controllers: [LessorsController],
-  providers: [LessorsService],
+  providers: [LessorsService, StorageService],
   exports: [LessorsService],
 })
 export class LessorsModule {}
