@@ -105,6 +105,7 @@ import { InjectRepository as InjectRepository2 } from '@nestjs/typeorm';
 import { Repository as Repository2 } from 'typeorm';
 import { TypeOrmModule as TypeOrmModule2 } from '@nestjs/typeorm';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
 import { IsString as IsString2, IsOptional as IsOptional2 } from 'class-validator';
 import { ApiTags as ApiTags2, ApiBearerAuth as ApiBearerAuth2 } from '@nestjs/swagger';
 import { Document, Booking, Lessor } from '../database/entities';
@@ -121,17 +122,17 @@ export class DocumentsService {
   ) {}
 
   async upload(ownerType: string, ownerId: string, documentType: string, file: Express.Multer.File) {
-    // In production: upload to S3/compatible and get signed URL
-    // For now: store path locally (mock)
-    const url = `/uploads/${Date.now()}-${file.originalname}`;
+    const { join, extname } = require('path');
+    const { existsSync, mkdirSync, writeFileSync } = require('fs');
+    const ext = extname(file.originalname) || '.bin';
+    const filename = `${Date.now()}-${Math.round(Math.random() * 1e6)}${ext}`;
+    const folder = `documents/${ownerType}/${ownerId}`;
+    const dir = join(process.cwd(), 'uploads', folder);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, filename), file.buffer);
+    const url = `/uploads/${folder}/${filename}`;
 
-    const doc = this.docRepo.create({
-      ownerType,
-      ownerId,
-      documentType,
-      url,
-      verificationStatus: 'pending',
-    });
+    const doc = this.docRepo.create({ ownerType, ownerId, documentType, url, verificationStatus: 'pending' });
     return this.docRepo.save(doc);
   }
 
@@ -165,7 +166,7 @@ export class DocumentsController {
   constructor(private readonly documentsService: DocumentsService) {}
 
   @Post2('upload')
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(FileInterceptor('file', { storage: memoryStorage() }))
   upload(
     @UploadedFile() file: Express.Multer.File,
     @Body2() body: { ownerType: string; ownerId: string; documentType: string },
@@ -543,7 +544,7 @@ import {
 } from '@nestjs/common';
 import type { Response as AdminResponse } from 'express';
 import { InjectRepository as AdminInject } from '@nestjs/typeorm';
-import { Repository as AdminRepo } from 'typeorm';
+import { Repository as AdminRepo, MoreThanOrEqual, Between } from 'typeorm';
 import { TypeOrmModule as AdminORM } from '@nestjs/typeorm';
 import { ApiTags as AdminApiTags, ApiBearerAuth as AdminBearer } from '@nestjs/swagger';
 import * as bcryptAdmin from 'bcrypt';
@@ -591,6 +592,44 @@ export class AdminService {
     const totalVolume = parseFloat(volumeResult?.total || '0');
     const financeSummary = await this.getFinanceSummary('month');
 
+    // Trend: current month vs previous month
+    const now = new Date();
+    const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const lastMonthEnd   = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999);
+
+    const [
+      bookingsThisMonth, bookingsLastMonth,
+      lessorsThisMonth,  lessorsLastMonth,
+      vehiclesThisMonth, vehiclesLastMonth,
+      volThisRaw, volLastRaw,
+    ] = await Promise.all([
+      this.bookingRepo.count({ where: { createdAt: MoreThanOrEqual(thisMonthStart) } }),
+      this.bookingRepo.count({ where: { createdAt: Between(lastMonthStart, lastMonthEnd) } }),
+      this.lessorRepo.count({ where: { createdAt: MoreThanOrEqual(thisMonthStart) } }),
+      this.lessorRepo.count({ where: { createdAt: Between(lastMonthStart, lastMonthEnd) } }),
+      this.vehicleRepo.count({ where: { createdAt: MoreThanOrEqual(thisMonthStart) } }),
+      this.vehicleRepo.count({ where: { createdAt: Between(lastMonthStart, lastMonthEnd) } }),
+      this.bookingRepo.createQueryBuilder('b')
+        .select('SUM(CAST(b.totalAmount AS DECIMAL))', 'total')
+        .where('b.status IN (:...st)', { st: ['confirmed', 'completed'] })
+        .andWhere('b.createdAt >= :s', { s: thisMonthStart }).getRawOne(),
+      this.bookingRepo.createQueryBuilder('b')
+        .select('SUM(CAST(b.totalAmount AS DECIMAL))', 'total')
+        .where('b.status IN (:...st)', { st: ['confirmed', 'completed'] })
+        .andWhere('b.createdAt BETWEEN :s AND :e', { s: lastMonthStart, e: lastMonthEnd }).getRawOne(),
+    ]);
+
+    const volThis = parseFloat(volThisRaw?.total || '0');
+    const volLast = parseFloat(volLastRaw?.total || '0');
+
+    const calcTrend = (curr: number, prev: number) => {
+      const dir = curr >= prev ? 'up' : 'down';
+      if (prev === 0) return { dir, value: curr > 0 ? `+${curr}` : '0' };
+      const pct = Math.round(((curr - prev) / prev) * 100);
+      return { dir, value: `${pct >= 0 ? '+' : ''}${pct}%` };
+    };
+
     // Revenue series: last 30 days
     const revenueSeries = await this.bookingRepo
       .createQueryBuilder('b')
@@ -629,6 +668,12 @@ export class AdminService {
       totalVolume,
       totalCommission: financeSummary.commissionTotal,
       financeSummary,
+      trends: {
+        lessors:  calcTrend(lessorsThisMonth,  lessorsLastMonth),
+        vehicles: calcTrend(vehiclesThisMonth, vehiclesLastMonth),
+        bookings: calcTrend(bookingsThisMonth, bookingsLastMonth),
+        volume:   calcTrend(volThis, volLast),
+      },
       revenueSeries: revenueSeries.map(r => ({ label: r.label, v: parseFloat(r.v || '0') })),
       topWilayas,
       recentBookings: recentBookings.map(b => ({
@@ -641,6 +686,35 @@ export class AdminService {
         createdAt: b.createdAt,
       })),
     };
+  }
+
+  async getLessorsMap() {
+    const lessors = await this.lessorRepo.find({
+      where: { status: 'approved' },
+      select: ['id', 'wilaya', 'businessName'] as any,
+    });
+
+    const revenueRaw = await this.bookingRepo
+      .createQueryBuilder('b')
+      .select('b.lessorId', 'lessorId')
+      .addSelect('SUM(CAST(b.totalAmount AS DECIMAL))', 'revenue')
+      .where('b.status IN (:...st)', { st: ['confirmed', 'completed'] })
+      .groupBy('b.lessorId')
+      .getRawMany();
+
+    const revenueMap = new Map<string, number>(revenueRaw.map(r => [r.lessorId, parseFloat(r.revenue || '0')]));
+
+    const byWilaya = new Map<string, { wilaya: string; lessorCount: number; totalRevenue: number; names: string[] }>();
+    for (const l of lessors) {
+      const wilaya = (l.wilaya || 'Non spécifiée').trim();
+      if (!byWilaya.has(wilaya)) byWilaya.set(wilaya, { wilaya, lessorCount: 0, totalRevenue: 0, names: [] });
+      const e = byWilaya.get(wilaya)!;
+      e.lessorCount++;
+      e.totalRevenue = Math.round(e.totalRevenue + (revenueMap.get(l.id) || 0));
+      e.names.push(l.businessName);
+    }
+
+    return Array.from(byWilaya.values()).sort((a, b) => b.totalRevenue - a.totalRevenue);
   }
 
   // ─── Lessors ─────────────────────────────────────────────────
@@ -1068,6 +1142,9 @@ export class AdminController {
 
   @AdminGet('dashboard')
   dashboard() { return this.adminService.getDashboard(); }
+
+  @AdminGet('lessors/map')
+  getLessorsMap() { return this.adminService.getLessorsMap(); }
 
   // Lessors
   @AdminPost('lessors')

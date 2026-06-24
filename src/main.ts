@@ -4,6 +4,7 @@ import { ValidationPipe, Logger } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { join } from 'path';
+import helmet from 'helmet';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
@@ -14,6 +15,11 @@ async function bootstrap() {
   const configService = app.get(ConfigService);
   const port = configService.get<number>('PORT', 3000);
   const apiPrefix = configService.get<string>('API_PREFIX', 'api/v1');
+
+  // Security headers
+  app.use(helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' }, // allow images/assets from cross-origin (uploads served on different port in dev)
+  }));
 
   // Global prefix
   app.setGlobalPrefix(apiPrefix);

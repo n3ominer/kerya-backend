@@ -36,6 +36,7 @@
     "dayjs": "^1.11.10",
     "exceljs": "^4.4.0",
     "firebase-admin": "^11.11.0",
+    "helmet": "^8.2.0",
     "ioredis": "^5.3.2",
     "multer": "^1.4.5-lts.1",
     "nodemailer": "^6.9.7",

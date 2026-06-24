@@ -16,6 +16,7 @@ import { Strategy as JwtStrategy, ExtractJwt } from 'passport-jwt';
 import { AuthGuard, PassportStrategy } from '@nestjs/passport';
 import { IsString, IsEmail, IsEnum, MinLength, IsMobilePhone } from 'class-validator';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiProperty } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import * as bcrypt from 'bcrypt';
 import { User } from '../../database/entities';
 
@@ -92,6 +93,15 @@ export class RolesGuard implements CanActivate {
 // ─── Auth Service ───────────────────────────────────────────
 @Injectable()
 export class AuthService {
+  // Brute-force protection maps (in-memory, per phone number)
+  private readonly loginAttempts = new Map<string, { count: number; lockedUntil: number }>();
+  private readonly otpAttempts   = new Map<string, { count: number; resetAt: number }>();
+
+  private static readonly MAX_LOGIN_FAILURES = 5;
+  private static readonly LOGIN_LOCK_MS      = 15 * 60 * 1000; // 15 min
+  private static readonly MAX_OTP_FAILURES   = 3;
+  private static readonly OTP_WINDOW_MS      = 10 * 60 * 1000; // 10 min
+
   constructor(
     @InjectRepository(User) private readonly userRepo: Repository<User>,
     private readonly jwtService: JwtService,
@@ -116,13 +126,31 @@ export class AuthService {
   }
 
   async login(dto: LoginDto) {
+    const key = dto.phone;
+    const now = Date.now();
+    const rec = this.loginAttempts.get(key);
+
+    // Check account lock
+    if (rec && rec.lockedUntil > now) {
+      const minutesLeft = Math.ceil((rec.lockedUntil - now) / 60000);
+      throw new UnauthorizedException(`Compte temporairement verrouillé. Réessayez dans ${minutesLeft} min.`);
+    }
+
     const user = await this.userRepo.findOne({ where: { phone: dto.phone } });
-    if (!user || !user.passwordHash) {
+    const valid = user?.passwordHash ? await bcrypt.compare(dto.password, user.passwordHash) : false;
+
+    if (!user || !valid) {
+      const current = (rec && rec.lockedUntil <= now) ? { count: 0, lockedUntil: 0 } : (rec || { count: 0, lockedUntil: 0 });
+      const count = current.count + 1;
+      const lockedUntil = count >= AuthService.MAX_LOGIN_FAILURES ? now + AuthService.LOGIN_LOCK_MS : 0;
+      this.loginAttempts.set(key, { count, lockedUntil });
       throw new UnauthorizedException('Identifiants invalides');
     }
-    const valid = await bcrypt.compare(dto.password, user.passwordHash);
-    if (!valid) throw new UnauthorizedException('Identifiants invalides');
+
     if (!user.isActive) throw new UnauthorizedException('Compte désactivé');
+
+    // Reset on success
+    this.loginAttempts.delete(key);
     return this.generateTokens(user);
   }
 
@@ -157,15 +185,32 @@ export class AuthService {
   }
 
   async verifyOtp(dto: VerifyOtpDto) {
-    const user = await this.userRepo.findOne({ where: { phone: dto.phone } });
-    if (!user || user.otpCode !== dto.otp) throw new UnauthorizedException('OTP invalide');
-    if (new Date() > user.otpExpiresAt) throw new UnauthorizedException('OTP expiré');
+    const key = dto.phone;
+    const now = Date.now();
+    const rec = this.otpAttempts.get(key) || { count: 0, resetAt: now + AuthService.OTP_WINDOW_MS };
 
-    await this.userRepo.update(user.id, {
-      otpCode: null,
-      otpExpiresAt: null,
-      isVerified: true,
-    });
+    // Reset window if expired
+    const current = rec.resetAt <= now ? { count: 0, resetAt: now + AuthService.OTP_WINDOW_MS } : rec;
+
+    if (current.count >= AuthService.MAX_OTP_FAILURES) {
+      throw new UnauthorizedException('Trop de tentatives. Demandez un nouveau code OTP.');
+    }
+
+    const user = await this.userRepo.findOne({ where: { phone: dto.phone } });
+
+    if (!user || user.otpCode !== dto.otp) {
+      this.otpAttempts.set(key, { count: current.count + 1, resetAt: current.resetAt });
+      throw new UnauthorizedException('OTP invalide');
+    }
+
+    if (new Date() > user.otpExpiresAt) {
+      this.otpAttempts.set(key, { count: current.count + 1, resetAt: current.resetAt });
+      throw new UnauthorizedException('OTP expiré. Demandez un nouveau code.');
+    }
+
+    // Reset on success
+    this.otpAttempts.delete(key);
+    await this.userRepo.update(user.id, { otpCode: null, otpExpiresAt: null, isVerified: true });
     return this.generateTokens(user);
   }
 
@@ -182,24 +227,28 @@ export class AuthService {
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   @Post('login')
   @ApiOperation({ summary: 'Connexion par téléphone + mot de passe' })
   login(@Body() dto: LoginDto) {
     return this.authService.login(dto);
   }
 
+  @Throttle({ default: { limit: 3, ttl: 3600000 } })
   @Post('signup')
   @ApiOperation({ summary: 'Inscription client ou loueur' })
   signup(@Body() dto: SignupDto) {
     return this.authService.signup(dto);
   }
 
+  @Throttle({ default: { limit: 3, ttl: 300000 } })
   @Post('otp/send')
   @ApiOperation({ summary: 'Envoyer un code OTP' })
   sendOtp(@Body() dto: SendOtpDto) {
     return this.authService.sendOtp(dto.phone);
   }
 
+  @Throttle({ default: { limit: 5, ttl: 300000 } })
   @Post('otp/verify')
   @ApiOperation({ summary: 'Vérifier le code OTP' })
   verifyOtp(@Body() dto: VerifyOtpDto) {
