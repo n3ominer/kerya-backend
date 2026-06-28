@@ -127,7 +127,9 @@ export class DocumentsService {
     const ext = extname(file.originalname) || '.bin';
     const filename = `${Date.now()}-${Math.round(Math.random() * 1e6)}${ext}`;
     const folder = `documents/${ownerType}/${ownerId}`;
-    const dir = join(process.cwd(), 'uploads', folder);
+    // Use UPLOAD_DIR env var so Railway/Docker can point to a writable volume (/tmp/uploads)
+    const baseDir = process.env.UPLOAD_DIR || join(process.cwd(), 'uploads');
+    const dir = join(baseDir, folder);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, filename), file.buffer);
     const url = `/uploads/${folder}/${filename}`;

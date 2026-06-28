@@ -110,7 +110,7 @@ export class Lessor {
   @Column({ type: 'text', nullable: true })
   description: string;
 
-  @Column({ length: 20, nullable: true })
+  @Column({ length: 50, nullable: true })
   rib: string;
 
   @Column({

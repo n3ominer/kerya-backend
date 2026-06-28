@@ -17,6 +17,7 @@ import { Payment, Booking, Lessor } from '../../database/entities';
 import { JwtAuthGuard, Roles, RolesGuard } from '../auth/auth.module';
 import { SettingsModule, SettingsService } from '../settings/settings.module';
 import { buildPaymentsWorkbook } from '../../common/excel.util';
+import { buildPaymentsPdf } from '../../common/export-pdf.util';
 
 // ─── Payment Provider Interface ─────────────────────────────
 export interface PaymentInitResult {
@@ -434,38 +435,44 @@ export class PaymentsController {
   @Get('lessor/export')
   @UseGuards(RolesGuard)
   @Roles('lessor')
-  @ApiOperation({ summary: 'Export Excel des paiements du loueur' })
+  @ApiOperation({ summary: 'Export paiements du loueur (PDF ou Excel)' })
   async lessorPaymentsExport(
     @Request() req: any,
     @Res() res: Response,
     @Query('period') period: string = 'month',
     @Query('granularity') granularity: string = 'day',
+    @Query('format') format: string = 'pdf',
   ) {
     const data = await this.paymentsService.getLessorPayments(req.user.id, period, granularity);
-    const buffer = await buildPaymentsWorkbook(data);
-    res.set({
-      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'Content-Disposition': `attachment; filename="paiements-${period}.xlsx"`,
-    });
+    if (format === 'xlsx') {
+      const buffer = await buildPaymentsWorkbook(data);
+      res.set({ 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'Content-Disposition': `attachment; filename="paiements-${period}.xlsx"` });
+      return res.send(buffer);
+    }
+    const buffer = await buildPaymentsPdf(data, `Export paiements — ${period}`);
+    res.set({ 'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename="paiements-${period}.pdf"` });
     res.send(buffer);
   }
 
   @Get('admin/lessors/:id/export')
   @UseGuards(RolesGuard)
   @Roles('admin')
-  @ApiOperation({ summary: 'Export Excel des paiements d\'un loueur (admin)' })
+  @ApiOperation({ summary: 'Export paiements d\'un loueur (PDF ou Excel)' })
   async adminLessorPaymentsExport(
     @Param('id') id: string,
     @Res() res: Response,
     @Query('period') period: string = 'month',
     @Query('granularity') granularity: string = 'day',
+    @Query('format') format: string = 'pdf',
   ) {
     const data = await this.paymentsService.getLessorPaymentsById(id, period, granularity);
-    const buffer = await buildPaymentsWorkbook(data);
-    res.set({
-      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'Content-Disposition': `attachment; filename="paiements-${period}.xlsx"`,
-    });
+    if (format === 'xlsx') {
+      const buffer = await buildPaymentsWorkbook(data);
+      res.set({ 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'Content-Disposition': `attachment; filename="paiements-${period}.xlsx"` });
+      return res.send(buffer);
+    }
+    const buffer = await buildPaymentsPdf(data, `Export paiements — ${period}`);
+    res.set({ 'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename="paiements-${period}.pdf"` });
     res.send(buffer);
   }
 }

@@ -24,8 +24,9 @@ async function bootstrap() {
   // Global prefix
   app.setGlobalPrefix(apiPrefix);
 
-  // Serve uploaded files (photos, documents) as static assets
-  app.useStaticAssets(join(__dirname, '..', 'uploads'), { prefix: '/uploads/' });
+  // Serve uploaded files — use UPLOAD_DIR env var so it matches where files are actually written
+  const uploadsDir = process.env.UPLOAD_DIR || join(__dirname, '..', 'uploads');
+  app.useStaticAssets(uploadsDir, { prefix: '/uploads/' });
 
   // CORS
   const isProduction = configService.get('NODE_ENV') === 'production';

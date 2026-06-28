@@ -35,7 +35,8 @@ export class LessorsService {
 
   async create(ownerUserId: string, dto: CreateLessorDto) {
     const existing = await this.lessorRepo.findOne({ where: { ownerUserId } });
-    if (existing) throw new ForbiddenException('Profil loueur déjà existant');
+    // Idempotent: return existing profile rather than throwing so retries don't break the onboarding flow
+    if (existing) return existing;
     const lessor = this.lessorRepo.create({ ...dto, ownerUserId, status: 'pending' });
     return this.lessorRepo.save(lessor);
   }

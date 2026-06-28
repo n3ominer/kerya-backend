@@ -20,6 +20,7 @@ import {
 import { JwtAuthGuard, Roles, RolesGuard } from '../auth/auth.module';
 import { SettingsModule, SettingsService } from '../settings/settings.module';
 import { buildBookingsWorkbook } from '../../common/excel.util';
+import { buildBookingsPdf } from '../../common/export-pdf.util';
 import { randomBytes } from 'crypto';
 
 // ─── DTOs ──────────────────────────────────────────────────
@@ -315,36 +316,42 @@ export class BookingsController {
   @Get('lessor/export')
   @UseGuards(RolesGuard)
   @Roles('lessor')
-  @ApiOperation({ summary: 'Export Excel des réservations du loueur' })
+  @ApiOperation({ summary: 'Export réservations du loueur (PDF ou Excel)' })
   async lessorBookingsExport(
     @Request() req: any,
     @Res() res: Response,
     @Query('status') status?: string,
+    @Query('format') format: string = 'pdf',
   ) {
     const bookings = await this.bookingsService.findAllForLessor(req.user.id, status);
-    const buffer = await buildBookingsWorkbook(bookings);
-    res.set({
-      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'Content-Disposition': 'attachment; filename="reservations.xlsx"',
-    });
+    if (format === 'xlsx') {
+      const buffer = await buildBookingsWorkbook(bookings);
+      res.set({ 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'Content-Disposition': 'attachment; filename="reservations.xlsx"' });
+      return res.send(buffer);
+    }
+    const buffer = await buildBookingsPdf(bookings, 'Export réservations');
+    res.set({ 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment; filename="reservations.pdf"' });
     res.send(buffer);
   }
 
   @Get('admin/lessors/:id/export')
   @UseGuards(RolesGuard)
   @Roles('admin')
-  @ApiOperation({ summary: 'Export Excel des réservations d\'un loueur (admin)' })
+  @ApiOperation({ summary: 'Export réservations d\'un loueur (PDF ou Excel)' })
   async adminLessorBookingsExport(
     @Param('id') id: string,
     @Res() res: Response,
     @Query('status') status?: string,
+    @Query('format') format: string = 'pdf',
   ) {
     const bookings = await this.bookingsService.findAllForLessorId(id, status);
-    const buffer = await buildBookingsWorkbook(bookings);
-    res.set({
-      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'Content-Disposition': 'attachment; filename="reservations.xlsx"',
-    });
+    if (format === 'xlsx') {
+      const buffer = await buildBookingsWorkbook(bookings);
+      res.set({ 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'Content-Disposition': 'attachment; filename="reservations.xlsx"' });
+      return res.send(buffer);
+    }
+    const buffer = await buildBookingsPdf(bookings, 'Export réservations');
+    res.set({ 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment; filename="reservations.pdf"' });
     res.send(buffer);
   }
 
