@@ -1,8 +1,19 @@
-// Strip sensitive fields before returning any User in API responses
+// Whitelist stricte pour les admins — retire les champs cryptographiques
 function safeUser(user: any) {
   if (!user) return null;
   const { passwordHash, otpCode, otpExpiresAt, otpAttempts, fcmToken, ...safe } = user;
   return safe;
+}
+
+// Whitelist stricte pour les loueurs — uniquement ce qui est nécessaire pour gérer une réservation
+function safeCustomerForLessor(user: any) {
+  if (!user) return null;
+  return {
+    id: user.id,
+    firstName: user.firstName,
+    lastName: user.lastName,
+    phone: user.phone,
+  };
 }
 
 // ============================================================
@@ -25,6 +36,7 @@ import {
   Booking, Vehicle, Availability, Lessor,
 } from '../../database/entities';
 import { JwtAuthGuard, Roles, RolesGuard } from '../auth/auth.module';
+import { Throttle } from '@nestjs/throttler';
 import { SettingsModule, SettingsService } from '../settings/settings.module';
 import { buildBookingsWorkbook } from '../../common/excel.util';
 import { buildBookingsPdf } from '../../common/export-pdf.util';
@@ -173,29 +185,37 @@ export class BookingsService {
     });
   }
 
-  async findAllForCustomer(customerId: string) {
+  async findAllForCustomer(customerId: string, page = 1, limit = 20) {
+    const take = Math.min(limit, 50);
+    const skip = (page - 1) * take;
     return this.bookingRepo.find({
       where: { customerId },
       relations: ['vehicle', 'vehicle.photos', 'lessor'],
       order: { createdAt: 'DESC' },
+      take,
+      skip,
     });
   }
 
-  async findAllForLessor(ownerUserId: string, status?: string) {
+  async findAllForLessor(ownerUserId: string, status?: string, page = 1, limit = 20) {
     const lessor = await this.lessorRepo.findOne({ where: { ownerUserId } });
     if (!lessor) return [];
-    return this.findAllForLessorId(lessor.id, status);
+    return this.findAllForLessorId(lessor.id, status, page, limit);
   }
 
-  async findAllForLessorId(lessorId: string, status?: string) {
+  async findAllForLessorId(lessorId: string, status?: string, page = 1, limit = 20) {
+    const take = Math.min(limit, 50);
+    const skip = (page - 1) * take;
     const where: any = { lessorId, hiddenForLessor: false };
     if (status) where.status = status;
     const bookings = await this.bookingRepo.find({
       where,
       relations: ['vehicle', 'customer'],
       order: { createdAt: 'DESC' },
+      take,
+      skip,
     });
-    return bookings.map(b => ({ ...b, customer: safeUser(b.customer) }));
+    return bookings.map(b => ({ ...b, customer: safeCustomerForLessor(b.customer) }));
   }
 
   async hideForLessor(id: string, ownerUserId: string) {
@@ -230,7 +250,11 @@ export class BookingsService {
         !!booking.lessor.welcomePeriodEndsAt && new Date(booking.createdAt) < new Date(booking.lessor.welcomePeriodEndsAt);
     }
 
-    return { ...booking, customer: safeUser((booking as any).customer) };
+    const customer = (booking as any).customer;
+    const sanitizedCustomer = userRole === 'admin'
+      ? safeUser(customer)
+      : safeCustomerForLessor(customer);
+    return { ...booking, customer: sanitizedCustomer };
   }
 
   async updateStatus(id: string, ownerUserId: string, dto: UpdateBookingStatusDto) {
@@ -307,18 +331,29 @@ export class BookingsController {
     return this.bookingsService.create(req.user.id, dto);
   }
 
+  @Throttle({ default: { limit: 30, ttl: 60000 } })
   @Get('my')
   @ApiOperation({ summary: 'Mes réservations (client)' })
-  myBookings(@Request() req: any) {
-    return this.bookingsService.findAllForCustomer(req.user.id);
+  myBookings(
+    @Request() req: any,
+    @Query('page') page = 1,
+    @Query('limit') limit = 20,
+  ) {
+    return this.bookingsService.findAllForCustomer(req.user.id, Number(page), Number(limit));
   }
 
+  @Throttle({ default: { limit: 30, ttl: 60000 } })
   @Get('lessor')
   @UseGuards(RolesGuard)
   @Roles('lessor', 'admin')
   @ApiOperation({ summary: 'Réservations du loueur' })
-  lessorBookings(@Request() req: any, @Query('status') status?: string) {
-    return this.bookingsService.findAllForLessor(req.user.id, status);
+  lessorBookings(
+    @Request() req: any,
+    @Query('status') status?: string,
+    @Query('page') page = 1,
+    @Query('limit') limit = 20,
+  ) {
+    return this.bookingsService.findAllForLessor(req.user.id, status, Number(page), Number(limit));
   }
 
   @Get('lessor/export')

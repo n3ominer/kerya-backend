@@ -18,6 +18,7 @@ import { IsString, IsEmail, IsEnum, MinLength, IsMobilePhone, Matches } from 'cl
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiProperty } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { v4 as uuidv4 } from 'uuid';
+import { randomInt } from 'crypto';
 import { User } from '../../database/entities';
 import { hashPassword, verifyPassword, isBcryptHash } from '../../common/password.util';
 import { TokenBlacklistService } from '../../common/token-blacklist.service';
@@ -197,12 +198,14 @@ export class AuthService {
     const user = await this.userRepo.findOne({ where: { phone } });
     if (!user) throw new BadRequestException('Numéro inconnu');
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otp = randomInt(100000, 1000000).toString();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
     await this.userRepo.update(user.id, { otpCode: otp, otpExpiresAt: expiresAt });
 
     // TODO: send SMS via provider (Twilio / mock)
-    console.log(`[OTP] Phone: ${phone} — Code: ${otp}`);
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`[OTP DEV] Phone: ${phone} — Code: ${otp}`);
+    }
     return { message: 'OTP envoyé' };
   }
 
@@ -248,6 +251,27 @@ export class AuthService {
       await this.tokenBlacklist.blacklist(jti, refreshTtl);
     }
     return { message: 'Déconnecté' };
+  }
+
+  async refreshTokens(refreshToken: string) {
+    let payload: any;
+    try {
+      payload = this.jwtService.verify(refreshToken, {
+        secret: this.config.get('JWT_REFRESH_SECRET'),
+      });
+    } catch {
+      throw new UnauthorizedException('Refresh token invalide ou expiré');
+    }
+
+    // Blacklist l'ancien jti avant d'en émettre un nouveau (rotation)
+    if (payload.jti) {
+      await this.tokenBlacklist.blacklist(payload.jti, 60);
+    }
+
+    const user = await this.userRepo.findOne({ where: { id: payload.sub } });
+    if (!user || !user.isActive) throw new UnauthorizedException('Compte invalide');
+
+    return this.generateTokens(user);
   }
 }
 
@@ -299,6 +323,14 @@ export class AuthController {
   @ApiOperation({ summary: 'Déconnexion et révocation du token' })
   logout(@Request() req: any) {
     return this.authService.logout(req.user.jti);
+  }
+
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  @Post('refresh')
+  @ApiOperation({ summary: 'Renouveler les tokens (rotation)' })
+  refresh(@Body() body: { refresh_token: string }) {
+    if (!body?.refresh_token) throw new BadRequestException('refresh_token requis');
+    return this.authService.refreshTokens(body.refresh_token);
   }
 }
 
