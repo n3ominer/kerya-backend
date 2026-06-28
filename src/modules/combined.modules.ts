@@ -109,8 +109,8 @@ import { memoryStorage } from 'multer';
 import { IsString as IsString2, IsOptional as IsOptional2 } from 'class-validator';
 import { ApiTags as ApiTags2, ApiBearerAuth as ApiBearerAuth2 } from '@nestjs/swagger';
 import { Document, Booking, Lessor } from '../database/entities';
-import { ConfigService as ConfigService2 } from '@nestjs/config';
 import { ForbiddenException as DocsForbidden } from '@nestjs/common';
+import { StorageService } from '../common/storage.service';
 
 @Injectable2()
 export class DocumentsService {
@@ -118,21 +118,12 @@ export class DocumentsService {
     @InjectRepository2(Document) private readonly docRepo: Repository2<Document>,
     @InjectRepository2(Booking) private readonly docBookingRepo: Repository2<Booking>,
     @InjectRepository2(Lessor) private readonly docLessorRepo: Repository2<Lessor>,
-    private readonly config: ConfigService2,
+    private readonly storage: StorageService,
   ) {}
 
   async upload(ownerType: string, ownerId: string, documentType: string, file: Express.Multer.File) {
-    const { join, extname } = require('path');
-    const { existsSync, mkdirSync, writeFileSync } = require('fs');
-    const ext = extname(file.originalname) || '.bin';
-    const filename = `${Date.now()}-${Math.round(Math.random() * 1e6)}${ext}`;
     const folder = `documents/${ownerType}/${ownerId}`;
-    // Use UPLOAD_DIR env var so Railway/Docker can point to a writable volume (/tmp/uploads)
-    const baseDir = process.env.UPLOAD_DIR || join(process.cwd(), 'uploads');
-    const dir = join(baseDir, folder);
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, filename), file.buffer);
-    const url = `/uploads/${folder}/${filename}`;
+    const url = await this.storage.upload(file.buffer, folder, file.originalname);
 
     const doc = this.docRepo.create({ ownerType, ownerId, documentType, url, verificationStatus: 'pending' });
     return this.docRepo.save(doc);
@@ -190,7 +181,7 @@ export class DocumentsController {
 @Module2({
   imports: [TypeOrmModule2.forFeature([Document, Booking, Lessor])],
   controllers: [DocumentsController],
-  providers: [DocumentsService],
+  providers: [DocumentsService, StorageService],
   exports: [DocumentsService],
 })
 export class DocumentsModule {}

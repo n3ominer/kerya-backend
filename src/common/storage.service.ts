@@ -52,7 +52,8 @@ export class StorageService {
   }
 
   private uploadLocal(buffer: Buffer, folder: string, filename: string): string {
-    const dir = join(process.cwd(), 'uploads', folder);
+    const base = process.env.UPLOAD_DIR || join(process.cwd(), 'uploads');
+    const dir = join(base, folder);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, filename), buffer);
     return `/uploads/${folder}/${filename}`;
