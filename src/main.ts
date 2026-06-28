@@ -6,6 +6,7 @@ import { ConfigService } from '@nestjs/config';
 import { join } from 'path';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
+import { GlobalExceptionFilter } from './common/http-exception.filter';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -13,6 +14,14 @@ async function bootstrap() {
   });
 
   const configService = app.get(ConfigService);
+
+  // Crash immediately if JWT_SECRET is missing or is a placeholder — never run in production with a weak secret
+  const jwtSecret = configService.get<string>('JWT_SECRET');
+  if (!jwtSecret || jwtSecret === 'default_secret' || jwtSecret.startsWith('your_')) {
+    Logger.error('JWT_SECRET must be set to a strong random secret. Aborting.', 'Bootstrap');
+    process.exit(1);
+  }
+
   const port = configService.get<number>('PORT', 3000);
   const apiPrefix = configService.get<string>('API_PREFIX', 'api/v1');
 
@@ -56,6 +65,9 @@ async function bootstrap() {
       transformOptions: { enableImplicitConversion: true },
     }),
   );
+
+  // Global exception filter — masks stack traces in production
+  app.useGlobalFilters(new GlobalExceptionFilter());
 
   // Swagger documentation
   if (configService.get('NODE_ENV') !== 'production') {

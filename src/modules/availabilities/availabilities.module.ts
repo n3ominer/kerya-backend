@@ -1,10 +1,10 @@
-import { Module, Controller, Get, Post, Delete, Body, Param, Query, UseGuards, Request, Injectable, NotFoundException, ConflictException } from '@nestjs/common';
+import { Module, Controller, Get, Post, Delete, Body, Param, Query, UseGuards, Request, Injectable, NotFoundException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { IsString, IsDateString, IsOptional } from 'class-validator';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { Availability } from '../../database/entities';
+import { Availability, Vehicle, Lessor } from '../../database/entities';
 import { JwtAuthGuard, Roles, RolesGuard } from '../auth/auth.module';
 
 export class BlockDatesDto {
@@ -17,8 +17,9 @@ export class BlockDatesDto {
 @Injectable()
 export class AvailabilitiesService {
   constructor(
-    @InjectRepository(Availability)
-    private readonly availabilityRepo: Repository<Availability>,
+    @InjectRepository(Availability) private readonly availabilityRepo: Repository<Availability>,
+    @InjectRepository(Vehicle) private readonly vehicleRepo: Repository<Vehicle>,
+    @InjectRepository(Lessor) private readonly lessorRepo: Repository<Lessor>,
   ) {}
 
   async getForVehicle(vehicleId: string, from: string, to: string) {
@@ -34,7 +35,13 @@ export class AvailabilitiesService {
     return qb.getMany();
   }
 
-  async blockDates(lessorId: string, dto: BlockDatesDto) {
+  async blockDates(ownerUserId: string, dto: BlockDatesDto) {
+    // Verify the vehicle belongs to the authenticated lessor
+    const vehicle = await this.vehicleRepo.findOne({ where: { id: dto.vehicleId } });
+    if (!vehicle) throw new NotFoundException('Véhicule introuvable');
+    const lessor = await this.lessorRepo.findOne({ where: { id: vehicle.lessorId } });
+    if (!lessor || lessor.ownerUserId !== ownerUserId) throw new ForbiddenException('Accès refusé');
+
     const startAt = new Date(dto.startAt);
     const endAt = new Date(dto.endAt);
 
@@ -60,9 +67,15 @@ export class AvailabilitiesService {
     return this.availabilityRepo.save(block);
   }
 
-  async unblock(id: string) {
+  async unblock(id: string, ownerUserId: string) {
     const slot = await this.availabilityRepo.findOne({ where: { id, source: 'manual_block' } });
     if (!slot) throw new NotFoundException('Bloc introuvable');
+    // Verify ownership before unblocking
+    const vehicle = await this.vehicleRepo.findOne({ where: { id: slot.vehicleId } });
+    if (vehicle) {
+      const lessor = await this.lessorRepo.findOne({ where: { id: vehicle.lessorId } });
+      if (!lessor || lessor.ownerUserId !== ownerUserId) throw new ForbiddenException('Accès refusé');
+    }
     await this.availabilityRepo.delete(id);
     return { message: 'Débloqué' };
   }
@@ -97,13 +110,13 @@ export class AvailabilitiesController {
   @UseGuards(RolesGuard)
   @Roles('lessor')
   @ApiOperation({ summary: 'Débloquer des dates' })
-  unblock(@Param('id') id: string) {
-    return this.availabilitiesService.unblock(id);
+  unblock(@Param('id') id: string, @Request() req: any) {
+    return this.availabilitiesService.unblock(id, req.user.id);
   }
 }
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Availability])],
+  imports: [TypeOrmModule.forFeature([Availability, Vehicle, Lessor])],
   controllers: [AvailabilitiesController],
   providers: [AvailabilitiesService],
   exports: [AvailabilitiesService],

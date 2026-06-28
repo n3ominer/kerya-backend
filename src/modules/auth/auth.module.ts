@@ -14,11 +14,13 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Strategy as JwtStrategy, ExtractJwt } from 'passport-jwt';
 import { AuthGuard, PassportStrategy } from '@nestjs/passport';
-import { IsString, IsEmail, IsEnum, MinLength, IsMobilePhone } from 'class-validator';
+import { IsString, IsEmail, IsEnum, MinLength, IsMobilePhone, Matches } from 'class-validator';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiProperty } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
-import * as bcrypt from 'bcrypt';
+import { v4 as uuidv4 } from 'uuid';
 import { User } from '../../database/entities';
+import { hashPassword, verifyPassword, isBcryptHash } from '../../common/password.util';
+import { TokenBlacklistService } from '../../common/token-blacklist.service';
 
 // ─── DTOs ──────────────────────────────────────────────────
 export class LoginDto {
@@ -26,7 +28,7 @@ export class LoginDto {
   @IsString()
   phone: string;
 
-  @ApiProperty({ example: 'MyPassword123' })
+  @ApiProperty({ example: 'MyPassword123!' })
   @IsString()
   @MinLength(6)
   password: string;
@@ -37,7 +39,13 @@ export class SignupDto {
   @ApiProperty() @IsString() lastName: string;
   @ApiProperty() @IsEmail() email: string;
   @ApiProperty({ example: '+213612345678' }) @IsString() phone: string;
-  @ApiProperty() @IsString() @MinLength(6) password: string;
+  @ApiProperty()
+  @IsString()
+  @MinLength(8)
+  @Matches(/^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/, {
+    message: 'Le mot de passe doit contenir au moins 8 caractères, 1 majuscule, 1 chiffre et 1 caractère spécial',
+  })
+  password: string;
   @ApiProperty({ enum: ['customer', 'lessor'] }) @IsEnum(['customer', 'lessor']) role: string;
   @ApiProperty({ enum: ['fr', 'ar', 'en'], default: 'fr' }) preferredLanguage: string;
 }
@@ -54,7 +62,10 @@ export class VerifyOtpDto {
 // ─── JWT Strategy ───────────────────────────────────────────
 @Injectable()
 export class JwtAuthStrategy extends PassportStrategy(JwtStrategy, 'jwt') {
-  constructor(private readonly config: ConfigService) {
+  constructor(
+    private readonly config: ConfigService,
+    private readonly tokenBlacklist: TokenBlacklistService,
+  ) {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
@@ -63,7 +74,10 @@ export class JwtAuthStrategy extends PassportStrategy(JwtStrategy, 'jwt') {
   }
 
   async validate(payload: any) {
-    return { id: payload.sub, email: payload.email, role: payload.role };
+    if (payload.jti && await this.tokenBlacklist.isBlacklisted(payload.jti)) {
+      throw new UnauthorizedException('Token révoqué');
+    }
+    return { id: payload.sub, email: payload.email, role: payload.role, jti: payload.jti };
   }
 }
 
@@ -106,12 +120,14 @@ export class AuthService {
     @InjectRepository(User) private readonly userRepo: Repository<User>,
     private readonly jwtService: JwtService,
     private readonly config: ConfigService,
+    private readonly tokenBlacklist: TokenBlacklistService,
   ) {}
 
   private generateTokens(user: User) {
-    const payload = { sub: user.id, email: user.email, role: user.role };
+    const jti = uuidv4();
+    const payload = { sub: user.id, email: user.email, role: user.role, jti };
     return {
-      access_token: this.jwtService.sign(payload),
+      access_token: this.jwtService.sign(payload, { expiresIn: '30m' }),
       refresh_token: this.jwtService.sign(payload, {
         secret: this.config.get('JWT_REFRESH_SECRET'),
         expiresIn: this.config.get('JWT_REFRESH_EXPIRES_IN', '30d'),
@@ -121,7 +137,7 @@ export class AuthService {
   }
 
   private sanitizeUser(user: User) {
-    const { passwordHash, otpCode, otpExpiresAt, ...safe } = user as any;
+    const { passwordHash, otpCode, otpExpiresAt, otpAttempts, fcmToken, ...safe } = user as any;
     return safe;
   }
 
@@ -137,7 +153,7 @@ export class AuthService {
     }
 
     const user = await this.userRepo.findOne({ where: { phone: dto.phone } });
-    const valid = user?.passwordHash ? await bcrypt.compare(dto.password, user.passwordHash) : false;
+    const valid = user?.passwordHash ? await verifyPassword(user.passwordHash, dto.password) : false;
 
     if (!user || !valid) {
       const current = (rec && rec.lockedUntil <= now) ? { count: 0, lockedUntil: 0 } : (rec || { count: 0, lockedUntil: 0 });
@@ -148,6 +164,12 @@ export class AuthService {
     }
 
     if (!user.isActive) throw new UnauthorizedException('Compte désactivé');
+
+    // Transparent migration: re-hash bcrypt passwords to Argon2id on successful login
+    if (valid && isBcryptHash(user.passwordHash)) {
+      const newHash = await hashPassword(dto.password);
+      await this.userRepo.update(user.id, { passwordHash: newHash });
+    }
 
     // Reset on success
     this.loginAttempts.delete(key);
@@ -165,7 +187,7 @@ export class AuthService {
       firstName: dto.firstName,
       lastName: dto.lastName,
       preferredLanguage: dto.preferredLanguage || 'fr',
-      passwordHash: await bcrypt.hash(dto.password, 12),
+      passwordHash: await hashPassword(dto.password),
     });
     await this.userRepo.save(user);
     return this.generateTokens(user);
@@ -219,6 +241,14 @@ export class AuthService {
     if (!user) throw new UnauthorizedException();
     return this.sanitizeUser(user);
   }
+
+  async logout(jti: string) {
+    if (jti) {
+      const refreshTtl = 30 * 24 * 3600; // 30 days in seconds — matches refresh token expiry
+      await this.tokenBlacklist.blacklist(jti, refreshTtl);
+    }
+    return { message: 'Déconnecté' };
+  }
 }
 
 // ─── Auth Controller ────────────────────────────────────────
@@ -248,7 +278,7 @@ export class AuthController {
     return this.authService.sendOtp(dto.phone);
   }
 
-  @Throttle({ default: { limit: 5, ttl: 300000 } })
+  @Throttle({ default: { limit: 3, ttl: 300000 } })
   @Post('otp/verify')
   @ApiOperation({ summary: 'Vérifier le code OTP' })
   verifyOtp(@Body() dto: VerifyOtpDto) {
@@ -262,6 +292,14 @@ export class AuthController {
   getMe(@Request() req: any) {
     return this.authService.getMe(req.user.id);
   }
+
+  @Post('logout')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'Déconnexion et révocation du token' })
+  logout(@Request() req: any) {
+    return this.authService.logout(req.user.jti);
+  }
 }
 
 // ─── Auth Module ────────────────────────────────────────────
@@ -274,13 +312,13 @@ export class AuthController {
       imports: [ConfigModule],
       useFactory: (config: ConfigService) => ({
         secret: config.get('JWT_SECRET', 'default_secret'),
-        signOptions: { expiresIn: config.get('JWT_EXPIRES_IN', '24h') },
+        signOptions: { expiresIn: config.get('JWT_EXPIRES_IN', '30m') },
       }),
       inject: [ConfigService],
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtAuthStrategy, RolesGuard],
-  exports: [AuthService, JwtAuthStrategy, RolesGuard, JwtModule],
+  providers: [AuthService, JwtAuthStrategy, RolesGuard, TokenBlacklistService],
+  exports: [AuthService, JwtAuthStrategy, RolesGuard, JwtModule, TokenBlacklistService],
 })
 export class AuthModule {}

@@ -1,13 +1,20 @@
+// Strip sensitive fields before returning any User object in API responses
+function safeUser(user: any) {
+  if (!user) return null;
+  const { passwordHash, otpCode, otpExpiresAt, otpAttempts, fcmToken, ...safe } = user;
+  return safe;
+}
+
 // ============================================================
 // PRICING MODULE
 // ============================================================
-import { Module, Controller, Get, Post, Delete, Body, Param, UseGuards, Request, Injectable, NotFoundException } from '@nestjs/common';
+import { Module, Controller, Get, Post, Delete, Body, Param, UseGuards, Request, Injectable, NotFoundException, ForbiddenException as PricingForbidden } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { IsString, IsNumber, IsOptional, IsDateString } from 'class-validator';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { PricingRule } from '../database/entities';
+import { PricingRule, Vehicle as PricingVehicle, Lessor as PricingLessor } from '../database/entities';
 import { JwtAuthGuard, Roles, RolesGuard } from './auth/auth.module';
 
 export class CreatePricingRuleDto {
@@ -27,22 +34,32 @@ export class CreatePricingRuleDto {
 @Injectable()
 export class PricingService {
   constructor(
-    @InjectRepository(PricingRule)
-    private readonly rulesRepo: Repository<PricingRule>,
+    @InjectRepository(PricingRule) private readonly rulesRepo: Repository<PricingRule>,
+    @InjectRepository(PricingVehicle) private readonly pricingVehicleRepo: Repository<PricingVehicle>,
+    @InjectRepository(PricingLessor) private readonly pricingLessorRepo: Repository<PricingLessor>,
   ) {}
 
   async getForVehicle(vehicleId: string) {
     return this.rulesRepo.find({ where: { vehicleId }, order: { createdAt: 'ASC' } });
   }
 
-  async create(dto: CreatePricingRuleDto) {
+  private async assertVehicleOwner(vehicleId: string, ownerUserId: string) {
+    const vehicle = await this.pricingVehicleRepo.findOne({ where: { id: vehicleId } });
+    if (!vehicle) throw new NotFoundException('Véhicule introuvable');
+    const lessor = await this.pricingLessorRepo.findOne({ where: { id: vehicle.lessorId } });
+    if (!lessor || lessor.ownerUserId !== ownerUserId) throw new PricingForbidden('Accès refusé');
+  }
+
+  async create(dto: CreatePricingRuleDto, ownerUserId?: string) {
+    if (ownerUserId) await this.assertVehicleOwner(dto.vehicleId, ownerUserId);
     const rule = this.rulesRepo.create(dto);
     return this.rulesRepo.save(rule);
   }
 
-  async delete(id: string) {
+  async delete(id: string, ownerUserId?: string) {
     const rule = await this.rulesRepo.findOne({ where: { id } });
     if (!rule) throw new NotFoundException();
+    if (ownerUserId) await this.assertVehicleOwner(rule.vehicleId, ownerUserId);
     await this.rulesRepo.delete(id);
     return { message: 'Règle supprimée' };
   }
@@ -79,18 +96,20 @@ export class PricingController {
   }
 
   @Post()
-  create(@Body() dto: CreatePricingRuleDto) {
-    return this.pricingService.create(dto);
+  create(@Body() dto: CreatePricingRuleDto, @Request() req: any) {
+    const ownerUserId = req.user.role === 'admin' ? undefined : req.user.id;
+    return this.pricingService.create(dto, ownerUserId);
   }
 
   @Delete(':id')
-  delete(@Param('id') id: string) {
-    return this.pricingService.delete(id);
+  delete(@Param('id') id: string, @Request() req: any) {
+    const ownerUserId = req.user.role === 'admin' ? undefined : req.user.id;
+    return this.pricingService.delete(id, ownerUserId);
   }
 }
 
 @Module({
-  imports: [TypeOrmModule.forFeature([PricingRule])],
+  imports: [TypeOrmModule.forFeature([PricingRule, PricingVehicle, PricingLessor])],
   controllers: [PricingController],
   providers: [PricingService],
   exports: [PricingService],
@@ -109,8 +128,10 @@ import { memoryStorage } from 'multer';
 import { IsString as IsString2, IsOptional as IsOptional2 } from 'class-validator';
 import { ApiTags as ApiTags2, ApiBearerAuth as ApiBearerAuth2 } from '@nestjs/swagger';
 import { Document, Booking, Lessor } from '../database/entities';
-import { ForbiddenException as DocsForbidden } from '@nestjs/common';
+import { ForbiddenException as DocsForbidden, ForbiddenException as DocsOwnerForbidden, BadRequestException as DocsBadRequest } from '@nestjs/common';
 import { StorageService } from '../common/storage.service';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { fileTypeFromBuffer } = require('file-type');
 
 @Injectable2()
 export class DocumentsService {
@@ -122,6 +143,12 @@ export class DocumentsService {
   ) {}
 
   async upload(ownerType: string, ownerId: string, documentType: string, file: Express.Multer.File) {
+    const ALLOWED_MAGIC = ['image/jpeg', 'image/png', 'application/pdf'];
+    const detected = await fileTypeFromBuffer(file.buffer);
+    if (!detected || !ALLOWED_MAGIC.includes(detected.mime)) {
+      throw new DocsBadRequest('Contenu du fichier invalide (JPG, PNG ou PDF uniquement)');
+    }
+
     const folder = `documents/${ownerType}/${ownerId}`;
     const url = await this.storage.upload(file.buffer, folder, file.originalname);
 
@@ -151,21 +178,49 @@ export class DocumentsService {
   }
 }
 
+const ALLOWED_DOC_MIMES = ['image/jpeg', 'image/png', 'application/pdf'];
+
 @ApiTags2('documents')
 @ApiBearerAuth2()
 @UseGuards2(JwtAuthGuard)
 @Controller2('documents')
 export class DocumentsController {
-  constructor(private readonly documentsService: DocumentsService) {}
+  constructor(
+    private readonly documentsService: DocumentsService,
+    @InjectRepository2(Lessor) private readonly ctrlLessorRepo: Repository2<Lessor>,
+  ) {}
 
   @Post2('upload')
-  @UseInterceptors(FileInterceptor('file', { storage: memoryStorage() }))
-  upload(
+  @UseInterceptors(FileInterceptor('file', {
+    storage: memoryStorage(),
+    limits: { fileSize: 5 * 1024 * 1024 },
+    fileFilter: (_, file, cb) => {
+      if (ALLOWED_DOC_MIMES.includes(file.mimetype)) cb(null, true);
+      else cb(new Error('Type de fichier non autorisé (JPG, PNG, PDF uniquement)'), false);
+    },
+  }))
+  async upload(
     @UploadedFile() file: Express.Multer.File,
     @Body2() body: { ownerType: string; ownerId: string; documentType: string },
     @Request2() req: any,
   ) {
-    return this.documentsService.upload(body.ownerType, body.ownerId, body.documentType, file);
+    if (!file) throw new DocsBadRequest('Fichier manquant ou type non autorisé');
+    const { ownerType, ownerId, documentType } = body;
+    const userId: string = req.user.id;
+    const role: string = req.user.role;
+
+    if (role !== 'admin' && role !== 'support_agent') {
+      if (ownerType === 'lessor') {
+        const lessor = await this.ctrlLessorRepo.findOne({ where: { id: ownerId } });
+        if (!lessor || lessor.ownerUserId !== userId) throw new DocsOwnerForbidden('Accès refusé');
+      } else if (ownerType === 'user') {
+        if (ownerId !== userId) throw new DocsOwnerForbidden('Accès refusé');
+      } else {
+        throw new DocsOwnerForbidden('Accès refusé');
+      }
+    }
+
+    return this.documentsService.upload(ownerType, ownerId, documentType, file);
   }
 
   @Get2(':ownerType/:ownerId')
@@ -240,12 +295,13 @@ export class ReviewsService {
   }
 
   async getForVehicle(vehicleId: string) {
-    return this.reviewRepo.find({
+    const reviews = await this.reviewRepo.find({
       where: { vehicleId },
       relations: ['customer'],
       order: { createdAt: 'DESC' },
       take: 50,
     });
+    return reviews.map(r => ({ ...r, customer: safeUser(r.customer) }));
   }
 }
 
@@ -540,7 +596,7 @@ import { InjectRepository as AdminInject } from '@nestjs/typeorm';
 import { Repository as AdminRepo, MoreThanOrEqual, Between } from 'typeorm';
 import { TypeOrmModule as AdminORM } from '@nestjs/typeorm';
 import { ApiTags as AdminApiTags, ApiBearerAuth as AdminBearer } from '@nestjs/swagger';
-import * as bcryptAdmin from 'bcrypt';
+import { hashPassword as adminHashPassword } from '../common/password.util';
 import { SettingsModule, SettingsService } from './settings/settings.module';
 import { buildInvoicePdf, InvoiceData, InvoiceLine } from '../common/invoice-pdf.util';
 import { sendMailWithAttachment } from '../common/mailer.util';
@@ -648,11 +704,12 @@ export class AdminService {
     const topWilayas = topWilayasRaw.map(r => ({ wilaya: r.wilaya, count: parseInt(r.count, 10) }));
 
     // Recent bookings
-    const recentBookings = await this.bookingRepo.find({
+    const recentBookingsRaw = await this.bookingRepo.find({
       order: { createdAt: 'DESC' },
       take: 5,
       relations: ['customer', 'vehicle'],
     });
+    const recentBookings = recentBookingsRaw.map(b => ({ ...b, customer: safeUser(b.customer) }));
 
     return {
       activeLessors, pendingLessors,
@@ -723,7 +780,7 @@ export class AdminService {
       firstName: dto.firstName, lastName: dto.lastName,
       email: dto.email, phone: dto.phone,
       role: 'lessor',
-      passwordHash: await bcryptAdmin.hash(dto.password, 12),
+      passwordHash: await adminHashPassword(dto.password),
       isActive: true, isVerified: true,
     });
     const savedUser = await this.userRepo.save(user);
@@ -749,11 +806,12 @@ export class AdminService {
   async getAllLessors(status?: string) {
     const where: any = {};
     if (status && status !== 'all') where.status = status;
-    return this.lessorRepo.find({
+    const lessors = await this.lessorRepo.find({
       where,
       relations: ['owner'],
       order: { createdAt: 'DESC' },
     });
+    return lessors.map(l => ({ ...l, owner: safeUser(l.owner) }));
   }
 
   async approveLessor(id: string) {
@@ -797,7 +855,7 @@ export class AdminService {
     if (dto.lastName !== undefined) userUpdate.lastName = dto.lastName;
     if (dto.email !== undefined) userUpdate.email = dto.email;
     if (dto.phone !== undefined) userUpdate.phone = dto.phone;
-    if (dto.password) userUpdate.passwordHash = await bcryptAdmin.hash(dto.password, 12);
+    if (dto.password) userUpdate.passwordHash = await adminHashPassword(dto.password);
     if (Object.keys(userUpdate).length) {
       await this.userRepo.update(lessor.ownerUserId, userUpdate);
     }
@@ -814,7 +872,9 @@ export class AdminService {
       await this.lessorRepo.update(id, lessorUpdate);
     }
 
-    return this.lessorRepo.findOne({ where: { id }, relations: ['owner'] });
+    const updated = await this.lessorRepo.findOne({ where: { id }, relations: ['owner'] });
+    if (!updated) return updated;
+    return { ...updated, owner: safeUser(updated.owner) };
   }
 
   async deleteLessor(id: string) {
@@ -826,11 +886,12 @@ export class AdminService {
   }
 
   async getPendingLessors() {
-    return this.lessorRepo.find({
+    const lessors = await this.lessorRepo.find({
       where: { status: 'pending' },
       relations: ['owner'],
       order: { createdAt: 'ASC' },
     });
+    return lessors.map(l => ({ ...l, owner: safeUser(l.owner) }));
   }
 
   // ─── Vehicles ────────────────────────────────────────────────
@@ -885,7 +946,8 @@ export class AdminService {
       .take(limit);
 
     const [data, total] = await qb.getManyAndCount();
-    return { data, total, page, limit };
+    const safeData = data.map(b => ({ ...b, customer: safeUser(b.customer) }));
+    return { data: safeData, total, page, limit };
   }
 
   // ─── Finance ─────────────────────────────────────────────────
@@ -1302,7 +1364,8 @@ export class UsersService {
   async updateProfile(userId: string, data: Partial<User>) {
     const { id, passwordHash, ...safe } = data as any;
     await this.userRepo.update(userId, safe);
-    return this.userRepo.findOne({ where: { id: userId } });
+    const user = await this.userRepo.findOne({ where: { id: userId } });
+    return safeUser(user);
   }
 
   async updateFcmToken(userId: string, token: string) {

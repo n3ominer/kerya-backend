@@ -40,7 +40,7 @@ import { SettingsModule } from './modules/settings/settings.module';
         database: config.get('DB_NAME', 'vehiculedz_db'),
         entities: Object.values(DatabaseEntities),
         migrations: [__dirname + '/database/migrations/**/*{.ts,.js}'],
-        synchronize: config.get('DB_SYNC', 'true') === 'true',
+        synchronize: config.get('DB_SYNC', 'false') === 'true',
         logging: config.get('DB_LOGGING', 'false') === 'true',
         ssl: config.get('NODE_ENV') === 'production'
           ? { rejectUnauthorized: false }

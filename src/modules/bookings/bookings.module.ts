@@ -1,3 +1,10 @@
+// Strip sensitive fields before returning any User in API responses
+function safeUser(user: any) {
+  if (!user) return null;
+  const { passwordHash, otpCode, otpExpiresAt, otpAttempts, fcmToken, ...safe } = user;
+  return safe;
+}
+
 // ============================================================
 // BOOKINGS MODULE — NestJS
 // ============================================================
@@ -183,11 +190,12 @@ export class BookingsService {
   async findAllForLessorId(lessorId: string, status?: string) {
     const where: any = { lessorId, hiddenForLessor: false };
     if (status) where.status = status;
-    return this.bookingRepo.find({
+    const bookings = await this.bookingRepo.find({
       where,
       relations: ['vehicle', 'customer'],
       order: { createdAt: 'DESC' },
     });
+    return bookings.map(b => ({ ...b, customer: safeUser(b.customer) }));
   }
 
   async hideForLessor(id: string, ownerUserId: string) {
@@ -222,7 +230,7 @@ export class BookingsService {
         !!booking.lessor.welcomePeriodEndsAt && new Date(booking.createdAt) < new Date(booking.lessor.welcomePeriodEndsAt);
     }
 
-    return booking;
+    return { ...booking, customer: safeUser((booking as any).customer) };
   }
 
   async updateStatus(id: string, ownerUserId: string, dto: UpdateBookingStatusDto) {

@@ -4,7 +4,7 @@
 import {
   Module, Controller, Post, Body, Param, Get, Query,
   UseGuards, Request, Res, Injectable, NotFoundException,
-  BadRequestException,
+  BadRequestException, UnauthorizedException, Headers,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -388,7 +388,10 @@ export class PaymentsService {
 @UseGuards(JwtAuthGuard)
 @Controller('payments')
 export class PaymentsController {
-  constructor(private readonly paymentsService: PaymentsService) {}
+  constructor(
+    private readonly paymentsService: PaymentsService,
+    private readonly configSvc: ConfigService,
+  ) {}
 
   @Post('init')
   @ApiOperation({ summary: 'Initier un paiement (CIB, Edahabia, mock)' })
@@ -398,7 +401,9 @@ export class PaymentsController {
 
   @Post('webhook')
   @ApiOperation({ summary: 'Webhook de confirmation paiement' })
-  webhook(@Body() dto: ConfirmWebhookDto) {
+  webhook(@Headers('x-webhook-secret') secret: string, @Body() dto: ConfirmWebhookDto) {
+    const expected = this.configSvc.get<string>('PAYMENT_WEBHOOK_SECRET');
+    if (!expected || secret !== expected) throw new UnauthorizedException('Webhook secret invalide');
     return this.paymentsService.handleWebhook(dto);
   }
 
@@ -481,7 +486,7 @@ export class PaymentsController {
 @Module({
   imports: [TypeOrmModule.forFeature([Payment, Booking, Lessor]), SettingsModule],
   controllers: [PaymentsController],
-  providers: [PaymentsService, MockPaymentProvider, SatimPaymentProvider],
+  providers: [PaymentsService, MockPaymentProvider, SatimPaymentProvider, ConfigService],
   exports: [PaymentsService],
 })
 export class PaymentsModule {}
