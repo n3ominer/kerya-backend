@@ -130,8 +130,15 @@ import { ApiTags as ApiTags2, ApiBearerAuth as ApiBearerAuth2 } from '@nestjs/sw
 import { Document, Booking, Lessor } from '../database/entities';
 import { ForbiddenException as DocsForbidden, ForbiddenException as DocsOwnerForbidden, BadRequestException as DocsBadRequest } from '@nestjs/common';
 import { StorageService } from '../common/storage.service';
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const { fileTypeFromBuffer } = require('file-type');
+
+// Magic bytes detection — no external dependency, works on any Node.js version
+function detectMimeFromBuffer(buf: Buffer): string | null {
+  if (buf.length < 4) return null;
+  if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return 'image/jpeg';
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) return 'image/png';
+  if (buf[0] === 0x25 && buf[1] === 0x50 && buf[2] === 0x44 && buf[3] === 0x46) return 'application/pdf';
+  return null;
+}
 
 @Injectable2()
 export class DocumentsService {
@@ -143,9 +150,8 @@ export class DocumentsService {
   ) {}
 
   async upload(ownerType: string, ownerId: string, documentType: string, file: Express.Multer.File) {
-    const ALLOWED_MAGIC = ['image/jpeg', 'image/png', 'application/pdf'];
-    const detected = await fileTypeFromBuffer(file.buffer);
-    if (!detected || !ALLOWED_MAGIC.includes(detected.mime)) {
+    const detectedMime = detectMimeFromBuffer(file.buffer);
+    if (!detectedMime) {
       throw new DocsBadRequest('Contenu du fichier invalide (JPG, PNG ou PDF uniquement)');
     }
 
